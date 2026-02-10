@@ -1,0 +1,261 @@
+# attempt at my own Chmy.jl model using 2D stokes on cpu only
+
+using KernelAbstractions
+using Printf
+using CairoMakie
+using Chmy
+using Metal
+using Plots
+using FiniteDiffWENO5
+
+
+# ************** TWO OPTIONS FOR BACKEND: MeatlBackend(), or CPU() ***************
+
+const backend = CPU() # no cuda driver, running on CPUs for now but can also run on MeatlBackend
+
+
+#------------------------------------------------------------------------------------------------------------------------
+# kernel definitions from KernelAbstractions: runs one index per thread
+
+# this kernel doesnt solve any equations just stores the old fields before the next time step (solution backup)
+@kernel inbounds = true function update_old!(T, τ, T_old, τ_old, O) # 
+    I = @index(Global, NTuple) # this sets up the indexes depending on 2D 3D etc
+    I = I + O # O is an offset tuple to shift the index
+    T_old[I...] = T[I...] # I... means split the tuple into individual indexes 
+    τ_old.xx[I...] = τ.xx[I...] # storing those values
+    τ_old.yy[I...] = τ.yy[I...]
+    τ_old.xy[I...] = τ.xy[I...]
+end
+
+@kernel inbounds = true function update_stress!(τ, Pr, ∇V, V, τ_old, η, η_ve, G, dt, dτ_Pr, dτ_r, g::StructuredGrid, O)
+    I = @index(Global, NTuple) # global multidimensional index
+    I = I + O # add offset 
+    ε̇xx = ∂x(V.x, g, I...) # strain rates
+    ε̇yy = ∂y(V.y, g, I...)
+    ε̇xy = 0.5f0 * (∂y(V.x, g, I...) + ∂x(V.y, g, I...))
+    ∇V[I...] = divg(V, g, I...)
+    Pr[I...] -= ∇V[I...] * η_ve * dτ_Pr # pressure gradient
+    r_τxx = -(τ.xx[I...] - τ_old.xx[I...]) / (G * dt) - τ.xx[I...] / η + 2f0 * (ε̇xx - ∇V[I...] / 3f0) # stress tensor residuals
+    r_τyy = -(τ.yy[I...] - τ_old.yy[I...]) / (G * dt) - τ.yy[I...] / η + 2f0 * (ε̇yy - ∇V[I...] / 3f0)
+    r_τxy = -(τ.xy[I...] - τ_old.xy[I...]) / (G * dt) - τ.xy[I...] / η + 2f0 * ε̇xy
+    τ.xx[I...] += r_τxx * η_ve * dτ_r # stress tensors
+    τ.yy[I...] += r_τyy * η_ve * dτ_r
+    τ.xy[I...] += r_τxy * η_ve * dτ_r
+end
+
+
+
+@kernel inbounds = true function update_velocity!(V, r_V, Pr, τ, ρgy, η_ve, νdτ, g::StructuredGrid, O)
+    I = @index(Global, NTuple)
+    I = I + O
+    r_V.x[I...] = -∂x(Pr, g, I...) + ∂x(τ.xx, g, I...) + ∂y(τ.xy, g, I...) # residuals of velocity
+    r_V.y[I...] = -∂y(Pr, g, I...) +  ∂y(τ.yy, g, I...) + ∂x(τ.xy, g, I...) - ρgy[I...]
+    V.x[I...] += r_V.x[I...] * νdτ / η_ve # velocity components
+    V.y[I...] += r_V.y[I...] * νdτ / η_ve
+end
+
+
+
+@kernel inbounds = true function update_diffusion_flux!(q_diff, f, κ, g::StructuredGrid, O)
+    I = @index(Global, NTuple)
+    I = I + O
+    q_diff.x[I...] = -κ * ∂x(f, g, I...)
+    q_diff.y[I...] = -κ * ∂y(f, g, I...)
+end
+
+@kernel inbounds = true function update_advection_flux!(q_adv, f, V, g::StructuredGrid, O)
+    I = @index(Global, NTuple)
+    I = I + O
+
+    #weno = WENOScheme(f, grid; boundary = (1, 1, 1, 1), stag = stag)
+
+    #WENO_step!(f, q_adv, weno, dt, Δx, Δy, grid, arch)
+# change dx and dy to cell size, check dt is right, boundaries are a big question but the rest seems okay. 
+# have a look at the inner workings of this weno5 to check i get it and what equations they use
+    q_adv.x[I...] = max(V.x[I...], 0f0) * leftx(f, I...) + 
+                    min(V.x[I...], 0f0) * rightx(f, I...)
+    q_adv.y[I...] = max(V.y[I...], 0f0) * lefty(f, I...) + 
+                    min(V.y[I...], 0f0) * righty(f, I...)
+end 
+
+
+# now only has diff
+@kernel inbounds = true function update_thermal!(T, T_old, qT, dt, g::StructuredGrid, O)
+    I = @index(Global, NTuple)
+    I = I + O
+    T[I...] = T_old[I...] - dt * divg(qT, g, I...) # update the field after being previous values being saved in update old
+end
+
+
+
+
+
+
+# the main part of the code: visco-elastic, incompressible Stokes and heat advection–diffusion solve using Chmy.jl and KernelAbstractions.
+
+@views function main(; backend = CPU(), nxy::Int = 126)
+    arch = Arch(backend)
+    @info "Using backend: $(typeof(backend))"
+
+    # SETUP ------------------------------
+    # geometry
+    lx, ly = 2f0, 2f0 # domain size
+    nx = ny = nxy
+    grid   = UniformGrid(arch; origin=(-lx/2f0, -ly/2f0), extent=(lx, ly), dims=(nx, ny))     # 2D unifrm structured grid
+    launch = Launcher(arch, grid)
+    dx, dy = spacing(grid)
+
+    # mechanics
+    η    = 1f1 # solid viscosity
+    G    = 1f0 # shear modulus
+    ρg   = (x=-0f0, y=1f0) # gravity force density
+    # scales
+    psc  = G # pressure scale
+    τsc  = η/psc # stress scale
+
+    # heat
+    T0    = 1f0               # initial temperature
+    Ta    = 0.1f0               # atmospheric temperature
+    λ_T   = 1f-4 * ly^2f0 / τsc # thermal diffusivity (non dimensional)
+
+    # composition
+    c0    = 1f0              # initial composition
+    λ_c   = 1f-4 * ly^2f0 / τsc # compositional diffusivity (non dimensional)
+
+    # numerics
+    nt     = 10f0 # number of macro timesteps
+    niter  = 50f0nx # fixed point iterations per macro-step
+    ncheck = 2f0nx # how often check error
+    ϵ_it   = 1f-6 # convergence tolerance
+
+    # PT params for the nonlinear Stokes solve
+    re_m    = 2.3f0 * π 
+    r       = 0.5f0
+    lτ_re_m = min(lx, ly) / re_m
+    vdτ     = min(dx, dy) / sqrt(ndims(grid) * 1.1f0)
+    θ_dτ    = lτ_re_m * (r + 4f0 / 3f0) / vdτ
+    dτ_r    = 1f0 / (θ_dτ + 1f0)
+    νdτ     = vdτ * lτ_re_m
+    dτ_Pr   = r / θ_dτ
+
+    # allocate fields
+    Pr      = Field(backend, grid, Center()) # pressure
+    ∇V      = Field(backend, grid, Center()) # divergence of velocity
+    V       = VectorField(backend, grid) # velocity
+    r_V     = VectorField(backend, grid) 
+    τ       = TensorField(backend, grid) # stress components 
+    τ_old   = TensorField(backend, grid) # temperature 
+    T       = Field(backend, grid, Center())
+    T_old   = Field(backend, grid, Center())
+    qT_diff = VectorField(backend, grid) # heat flux vector 
+    qT_adv  = VectorField(backend, grid) # advective heat flux
+    c       = Field(backend, grid, Center()) # composition field
+    c_old   = Field(backend, grid, Center())
+    qc_diff = VectorField(backend, grid) # compositional flux vector
+    qc_adv  = VectorField(backend, grid) # advective compositional flux
+
+    
+    # initial conditions
+    init_incl(x, y, x0, y0, r, in, out) = ifelse((x - x0)^2f0 + (y - y0)^2f0 < r^2f0, in, out)
+    ρgy = FunctionField(init_incl, grid, (Center(), Vertex()); parameters=(x0=0f0, y0=0f0, r=0.1f0lx, in=ρg.y, out=0f0))
+    set!(T, grid, init_incl; parameters=(x0=0f0, y0=0f0, r=0.1f0lx, in=T0, out=Ta)) # adding a hot circle in centre with the cold outside
+    η_ve = 0.0
+
+    # boundary conditions
+    bc_V = (V.x => (x=Dirichlet(), y=Neumann()),     # no-slip left/right and free-slip top/bottom - so that is can slip along x and not y 
+            V.y => (x=Neumann(), y=Dirichlet()))     # free-slip left/right and no-slip top/bottom - so it can slip along y (the direction it moves)
+    bc_T = (T => Neumann(),)  
+    bc_c = (c => Neumann(),)                         # insulated boundaries
+    bc!(arch, grid, bc_T...)
+
+    # visualisation of heatmaps in each field for initial condition setup 
+    fig = Figure(; size=(800, 600))
+    axs = (Pr = Axis(fig[1, 1][1, 1]; aspect=DataAspect(), xlabel="x", title="Pr"),
+           Vx = Axis(fig[1, 2][1, 1]; aspect=DataAspect(), xlabel="x", title="Vx"),
+           Vy = Axis(fig[2, 1][1, 1]; aspect=DataAspect(), xlabel="x", title="Vy"),
+           T  = Axis(fig[2, 2][1, 1]; aspect=DataAspect(), xlabel="x", title="T"))
+    plt = (Pr = CairoMakie.heatmap!(axs.Pr, centers(grid)..., interior(Pr) |> Array; colormap=:turbo),
+           Vx = CairoMakie.heatmap!(axs.Vx, xvertices(grid), ycenters(grid), interior(V.x) |> Array; colormap=:turbo),
+           Vy = CairoMakie.heatmap!(axs.Vy, xcenters(grid), yvertices(grid), interior(V.y) |> Array; colormap=:turbo),
+           T  = CairoMakie.heatmap!(axs.T, centers(grid)..., interior(T) |> Array; colormap=:turbo))
+    Colorbar(fig[1, 1][1, 2], plt.Pr)
+    Colorbar(fig[1, 2][1, 2], plt.Vx)
+    Colorbar(fig[2, 1][1, 2], plt.Vy)
+    Colorbar(fig[2, 2][1, 2], plt.T)
+    display(fig)
+
+
+    # main time stepping loop 
+    @time begin
+        for it in 1:nt # time stepping loop - rename it as timesteps 
+            @printf("it = %d/%d \n", it, nt)
+            launch(arch, grid, update_old! => (T, τ, T_old, τ_old)) # save old fields 
+
+            # time step
+            dt_diff = min(dx, dy)^2f0 / λ_T / ndims(grid) / 2.1f0 # time step for diffusion?
+
+            # avoid division by zero in early iterations
+            safe_vx = maximum(abs.(interior(V.x))) > 0f0 ? maximum(abs.(interior(V.x))) : 1f-12
+            safe_vy = maximum(abs.(interior(V.y))) > 0f0 ? maximum(abs.(interior(V.y))) : 1f-12
+            dt_adv  = 0.1f0 * min(dx / safe_vx, dy / safe_vy) / ndims(grid) / 2.1f0 # time step for advection
+            dt      = min(dt_diff, dt_adv) # use consistent time step but make sure its the minimum between them
+
+            # rheology
+            η_ve = 1f0 / (1f0 / η + 1f0 / (G * dt)) # effective viscosity from maxwell viscoelastic law 
+            (it > 2) && (ncheck = ceil(Int, 0.5f0nx)) # adjusting error check recomputing interval for convergence check
+
+            # inside the smaller loop for stokes and heat to be iteratively solved until the residual is small 
+            for iter in 1:niter # nonlinear solver iterations
+                launch(arch, grid, update_stress! => (τ, Pr, ∇V, V, τ_old, η, η_ve, G, dt, dτ_Pr, dτ_r, grid)) # update stresses
+                launch(arch, grid, update_velocity! => (V, r_V, Pr, τ, ρgy, η_ve, νdτ, grid); bc=batch(grid, bc_V...; exchange=V)) # update the veolcity
+                
+                if it > 1 # after first outer step updating advection and diffusion of temperature - since these require T_old and we dont have guesses we use the first time step as T_old etc
+                
+                    #diffusion in T
+                    launch(arch, grid, update_diffusion_flux! => (qT_diff, T, λ_T, grid))
+                    
+                    launch(arch, grid, update_thermal! => (T, qT_diff, dt, grid); bc=batch(grid, bc_T...; exchange=T)) # update the temperature
+                    #advection in T 
+                    bc!(arch, grid, bc_T...)
+                    WENO_step!(T, V, weno_T, dt, dx, dy, grid, arch)
+
+                    #diffusion in c
+                    launch(arch, grid, update_diffusion_flux! => (qc_diff, c, λ_c, grid))
+                    launch(arch, grid, update_thermal! => (c, qc_diff, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature
+                    #advection in c 
+                    bc!(arch, grid, bc_c...)
+                    WENO_step!(c, V, weno_c, dt, dx, dy, grid, arch)
+                end
+                
+
+                if iter % ncheck == 0 # every ncheck iterations check error 
+                    bc!(arch, grid, r_V.x => (x=Dirichlet(),), r_V.y => (y=Dirichlet(),))
+                    err = (Pr=maximum(abs.(interior(∇V))) * τsc,
+                           Vx=maximum(abs.(interior(r_V.x))) * ly / psc,
+                           Vy=maximum(abs.(interior(r_V.y))) * ly / psc)
+                    @printf("  iter/nx=%.1f, err = [Pr=%1.3e, Vx=%1.3e, Vy=%1.3e] \n", iter / nx, err...)
+                    # stop if converged or error if NaN
+                    all(values(err) .< ϵ_it) && break
+                    any(.!isfinite.(values(err))) && error("simulation failed, err = $err")
+                end
+            end
+
+        end
+        KernelAbstractions.synchronize(backend) # make sure that all kernel launches finsih before moving onto plotting
+    end
+
+    # update the displayed arrays with final interiors
+    plt.Pr[3] = interior(Pr) |> Array # use the structure previously defined but plotted with new fields
+    plt.Vx[3] = interior(V.x) |> Array
+    plt.Vy[3] = interior(V.y) |> Array
+    plt.T[3] = interior(T) |> Array
+    display(fig)
+    savefig("chmy_stokes.png", fig) # save the figure as a png file
+
+    return
+end
+
+
+main() # run the main() function 
+
+
