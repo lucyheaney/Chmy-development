@@ -80,10 +80,10 @@ end
 
 
 # now only has diff
-@kernel inbounds = true function update_thermal!(T, T_old, qT, dt, g::StructuredGrid, O)
-    I = @index(Global, NTuple)
-    I = I + O
-    T[I...] = T_old[I...] - dt * divg(qT, g, I...) # update the field after being previous values being saved in update old
+@kernel inbounds = true function update_thermal!(f, f_old, q_diff, q_adv, dt, g::StructuredGrid, O) 
+    I = @index(Global, NTuple) 
+    I = I + O 
+    f[I...] = f_old[I...] - dt * (divg(q_diff, g, I...) + divg(q_adv, g, I...)) 
 end
 
 
@@ -211,20 +211,16 @@ end
                 
                 if it > 1 # after first outer step updating advection and diffusion of temperature - since these require T_old and we dont have guesses we use the first time step as T_old etc
                 
-                    #diffusion in T
+                    #T
                     launch(arch, grid, update_diffusion_flux! => (qT_diff, T, λ_T, grid))
-                    
-                    launch(arch, grid, update_thermal! => (T, qT_diff, dt, grid); bc=batch(grid, bc_T...; exchange=T)) # update the temperature
-                    #advection in T 
-                    bc!(arch, grid, bc_T...)
-                    WENO_step!(T, V, weno_T, dt, dx, dy, grid, arch)
+                    launch(arch, grid, update_advection_flux! => (qT_adv, T, V, grid))
+                    launch(arch, grid, update_thermal! => (T, T_old, qT_diff, qT_adv, dt, grid); bc=batch(grid, bc_T...; exchange=T)) # update the temperature
 
-                    #diffusion in c
+                    #c
                     launch(arch, grid, update_diffusion_flux! => (qc_diff, c, λ_c, grid))
-                    launch(arch, grid, update_thermal! => (c, qc_diff, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature
-                    #advection in c 
-                    bc!(arch, grid, bc_c...)
-                    WENO_step!(c, V, weno_c, dt, dx, dy, grid, arch)
+                    launch(arch, grid, update_advection_flux! => (qc_adv, c, V, grid))
+                    launch(arch, grid, update_thermal! => (c, c_old, qc_diff, qc_adv, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature
+                   
                 end
                 
 
@@ -250,7 +246,7 @@ end
     plt.Vy[3] = interior(V.y) |> Array
     plt.T[3] = interior(T) |> Array
     display(fig)
-    savefig("chmy_stokes.png", fig) # save the figure as a png file
+    #savefig("chmy_stokes.png") # save the figure as a png file
 
     return
 end
