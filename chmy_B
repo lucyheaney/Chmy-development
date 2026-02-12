@@ -69,28 +69,25 @@ end
     I = @index(Global, NTuple)
     println(I, "I")
     I = I + O
+    i, j = I
 
-    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
-    fyppos, fypneg, fympos, fymneg = stencil(f, "y", I)
+    vxmpos, vxmneg, vxppos, vxpneg = face_velocity(V, "x", i, j) # get the face velocities for the x direction - will need to be adapted to work with the grid structure and kernel launches vypmpos, vypmneg, vyppos, vypneg = face_velocity(V, "y") fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches fyppos, fypneg, fympos, fymneg = stencil(f, "y", I) # compute the WENO5 fluxes for x and y directions using the stencils and face velocities wp1 = g[1] ./ (b1 .+ eps)^2 wp2 = g[2] ./ (b2 .+ eps)^2
+    vympos, vymneg, vyppos, vypneg = face_velocity(V, "y", i, j) # get the face velocities for the y direction - will need to be adapted to work with the grid structure and kernel launches # compute the WENO5 fluxes for x and y directions using the stencils and face velocities F_xphalf = vxmpos * fxppos + vxmneg * fxpneg F_xmhalf = vxmpos * fxmpos + vxmneg * fxmneg q_adv.x[I...] = (F_xphalf - F_xmhalf) / dx F_yphalf = vympos * fyppos + vymneg * fypneg F_ymhalf = vympos * fympos + vymneg * fymneg q_adv.y[I...] = (F_yphalf - F_ymhalf) / dx end
+
+    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", i, j) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
+    fyppos, fypneg, fympos, fymneg = stencil(f, "y", i, j)
     
-    vx_pos, vx_neg = face_velocity(V, "x") # get the face velocities for the x direction - will need to be adapted to work with the grid structure and kernel launches vy_pos, vy_neg = face_velocity(V, "y") # compute the fluxes using the weno5 scheme - will need to be adapted to work with the grid structure and kernel launches
-    vx_pos, vx_neg = face_velocity(V, "y")
-    vx = V.x[i,j]
-    vy = V.y[i,j]
 
-    vx_pos = max(vx, 0f0)
-    vx_neg = min(vx, 0f0)
+    qxp = vxppos .* fxppos + vxpneg .* fxpneg
+    qxm = vxmpos .* fxmpos + vxmneg .* fxmneg
+    q_adv.x[I...] = (qxp - qxm) / dx
 
-    vy_pos = max(vy, 0f0) 
-    vy_neg = min(vy, 0f0)
+    qyp = vyppos .* fyppos + vypneg .* fypneg
+    qym = vympos .* fympos + vymneg .* fymneg
+    q_adv.y[I...] = (qyp - qym) / dx
 
-    F_xphalf = vx_pos * fxppos + vx_neg * fxpneg
-    F_xmhalf = vx_pos * fxmpos + vx_neg * fxmneg 
-    q_adv.x[I...] = (F_xphalf - F_xmhalf) / dx
+    adv = (qxp - qxm) / dx + (qyp - qym) / dx
 
-    F_yphalf = vy_pos * fyppos + vy_neg * fypneg
-    F_ymhalf = vy_pos * fympos + vy_neg * fymneg
-    q_adv.y[I...] = (F_yphalf - F_ymhalf) / dx 
     
     q_adv.x[I...] = max(V.x[I...], 0f0) * leftx(f, I...) + 
                     min(V.x[I...], 0f0) * rightx(f, I...)
@@ -99,6 +96,11 @@ end
 end 
 
 
+# trying to test the whole left stencil to see if i can just do left of a kind of thing 
+@kernel inbounds = true function test(f, g::StructuredGrid, O) 
+    I = @index(Global, NTuple) 
+    I = I + O f[I...] = f_old[I...] - dt * (divg(q_diff, g, I...) + divg(q_adv, g, I...)) end
+a =leftx(T, I...)
 
 nxy::Int = 126
     lx, ly = 2f0, 2f0 # domain size
@@ -113,8 +115,8 @@ qT_adv  = VectorField(backend, grid) # advective heat flux
 
 launch(arch, grid, update_advection_flux! => (qT_adv, T, V, grid))
 
-
-
+V.x
+V.y
 
 
 

@@ -20,9 +20,7 @@ function polys(fmm,fm,fc,fp,fpp)
     return flux_face
 end
 
-function stencil(f, dim, I)
-
-    i, j = I
+function stencil(f, dim, i, j)
 
     if dim == "x"
         fmmm = f[i-3, j]
@@ -57,21 +55,33 @@ function stencil(f, dim, I)
 
 end
 
-function face_velocity(V, dim)
+function face_velocity(V, dim, i, j)
 
     if dim == "x"
-        vx = V.x[i,j]
 
-        v_pos = max(vx, 0f0)
-        v_neg = min(vx, 0f0)
+        vx = V.x[i,j]
+        vxm = V.x[i-1,j]
+        vxp = V.x[i+1,j]
+
+        vmpos = 0.5 * (vxm + abs(vxm))
+        vmeng = 0.5 * (vxm - abs(vxm))
+
+        vppos = 0.5 * (vxp + abs(vxp))
+        vpneg = 0.5 * (vxp - abs(vxp))
 
     elseif dim == "y"
-        vy = V.y[i,j]
 
-        v_pos = max(vy, 0f0) 
-        v_neg = min(vy, 0f0)
+        vy = V.y[i,j]
+        vym = V.y[i,j-1]
+        vyp = V.y[i,j+1]
+
+        vmpos = 0.5 * (vym + abs(vym))
+        vmneg = 0.5 * (vym - abs(vym))
+
+        vppos = 0.5 * (vyp + abs(vyp)) 
+        vpneg = 0.5 * (vyp - abs(vyp))
     end
 
-    return v_pos, v_neg
+    return vmpos, vmneg, vppos, vpneg
 
 end
