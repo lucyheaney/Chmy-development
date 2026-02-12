@@ -8,6 +8,8 @@ using Metal
 using Plots
 using FiniteDiffWENO5
 
+include("weno5.jl") # including the weno5 scheme for advection fluxes -  will need to be adapted to work with the kernel launches and grid structure etc.
+
 
 # ************** TWO OPTIONS FOR BACKEND: MeatlBackend(), or CPU() ***************
 
@@ -63,15 +65,33 @@ end
     q_diff.y[I...] = -κ * ∂y(f, g, I...)
 end
 
-@kernel inbounds = true function update_advection_flux!(q_adv, f, V, g::StructuredGrid, O)
+@kernel inbounds = true function update_advection_flux!(q_adv, f, V, dx, g::StructuredGrid, O)
     I = @index(Global, NTuple)
+    println(I, "I")
     I = I + O
 
-    #weno = WENOScheme(f, grid; boundary = (1, 1, 1, 1), stag = stag)
+    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
+    fyppos, fypneg, fympos, fymneg = stencil(f, "y", I)
+    
+    vx_pos, vx_neg = face_velocity(V, "x") # get the face velocities for the x direction - will need to be adapted to work with the grid structure and kernel launches vy_pos, vy_neg = face_velocity(V, "y") # compute the fluxes using the weno5 scheme - will need to be adapted to work with the grid structure and kernel launches
+    vx_pos, vx_neg = face_velocity(V, "y")
+    vx = V.x[i,j]
+    vy = V.y[i,j]
 
-    #WENO_step!(f, q_adv, weno, dt, Δx, Δy, grid, arch)
-# change dx and dy to cell size, check dt is right, boundaries are a big question but the rest seems okay. 
-# have a look at the inner workings of this weno5 to check i get it and what equations they use
+    vx_pos = max(vx, 0f0)
+    vx_neg = min(vx, 0f0)
+
+    vy_pos = max(vy, 0f0) 
+    vy_neg = min(vy, 0f0)
+
+    F_xphalf = vx_pos * fxppos + vx_neg * fxpneg
+    F_xmhalf = vx_pos * fxmpos + vx_neg * fxmneg 
+    q_adv.x[I...] = (F_xphalf - F_xmhalf) / dx
+
+    F_yphalf = vy_pos * fyppos + vy_neg * fypneg
+    F_ymhalf = vy_pos * fympos + vy_neg * fymneg
+    q_adv.y[I...] = (F_yphalf - F_ymhalf) / dx 
+    
     q_adv.x[I...] = max(V.x[I...], 0f0) * leftx(f, I...) + 
                     min(V.x[I...], 0f0) * rightx(f, I...)
     q_adv.y[I...] = max(V.y[I...], 0f0) * lefty(f, I...) + 
@@ -79,15 +99,31 @@ end
 end 
 
 
-# now only has diff
+
+nxy::Int = 126
+    lx, ly = 2f0, 2f0 # domain size
+    nx = ny = nxy
+    arch = Arch(backend)
+grid   = UniformGrid(arch; origin=(-lx/2f0, -ly/2f0), extent=(lx, ly), dims=(nx, ny))     # 2D unifrm structured grid
+    launch = Launcher(arch, grid)
+    dx, dy = spacing(grid)
+V       = VectorField(backend, grid) # velocity
+T       = Field(backend, grid, Center()) # temperature field
+qT_adv  = VectorField(backend, grid) # advective heat flux
+
+launch(arch, grid, update_advection_flux! => (qT_adv, T, V, grid))
+
+
+
+
+
+
+
 @kernel inbounds = true function update_thermal!(f, f_old, q_diff, q_adv, dt, g::StructuredGrid, O) 
     I = @index(Global, NTuple) 
     I = I + O 
     f[I...] = f_old[I...] - dt * (divg(q_diff, g, I...) + divg(q_adv, g, I...)) 
 end
-
-
-
 
 
 
@@ -213,12 +249,12 @@ end
                 
                     #T
                     launch(arch, grid, update_diffusion_flux! => (qT_diff, T, λ_T, grid))
-                    launch(arch, grid, update_advection_flux! => (qT_adv, T, V, grid))
+                    launch(arch, grid, update_advection_flux! => (qT_adv, T, V, dx, grid))
                     launch(arch, grid, update_thermal! => (T, T_old, qT_diff, qT_adv, dt, grid); bc=batch(grid, bc_T...; exchange=T)) # update the temperature
 
                     #c
                     launch(arch, grid, update_diffusion_flux! => (qc_diff, c, λ_c, grid))
-                    launch(arch, grid, update_advection_flux! => (qc_adv, c, V, grid))
+                    launch(arch, grid, update_advection_flux! => (qc_adv, c, V, dx, grid))
                     launch(arch, grid, update_thermal! => (c, c_old, qc_diff, qc_adv, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature
                    
                 end
