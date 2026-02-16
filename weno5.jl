@@ -20,9 +20,19 @@ function polys(fmm,fm,fc,fp,fpp)
     return flux_face
 end
 
-function stencil(f, dim, i, j)
+function stencil(f, dim, i, j, I)
 
     if dim == "x"
+        println("f: ", size(f))
+        fmmm_a = leftx(f, I...)
+        println("fmmm_a: ", size(fmmm_a))
+        fmmm_b = leftx(fmmm_a, I...)
+        
+        "almost there with this ^
+        
+        instead i need to define bLx = Val(boundary[1]) and set the i,j = Tuple(I) 
+        then do the illl, ill, il, ir, irr, irrr with illl = left_index(i,3,nx,bLx)
+        u1 = u[illl,j] where u1 is the fmmm since u is the field f"
         fmmm = f[i-3, j]
         fmm  = f[i-2, j]
         fm   = f[i-1, j]
@@ -64,7 +74,7 @@ function face_velocity(V, dim, i, j)
         vxp = V.x[i+1,j]
 
         vmpos = 0.5 * (vxm + abs(vxm))
-        vmeng = 0.5 * (vxm - abs(vxm))
+        vmneg = 0.5 * (vxm - abs(vxm))
 
         vppos = 0.5 * (vxp + abs(vxp))
         vpneg = 0.5 * (vxp - abs(vxp))

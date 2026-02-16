@@ -74,7 +74,7 @@ end
     vxmpos, vxmneg, vxppos, vxpneg = face_velocity(V, "x", i, j) # get the face velocities for the x direction - will need to be adapted to work with the grid structure and kernel launches vypmpos, vypmneg, vyppos, vypneg = face_velocity(V, "y") fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches fyppos, fypneg, fympos, fymneg = stencil(f, "y", I) # compute the WENO5 fluxes for x and y directions using the stencils and face velocities wp1 = g[1] ./ (b1 .+ eps)^2 wp2 = g[2] ./ (b2 .+ eps)^2
     vympos, vymneg, vyppos, vypneg = face_velocity(V, "y", i, j) # get the face velocities for the y direction - will need to be adapted to work with the grid structure and kernel launches # compute the WENO5 fluxes for x and y directions using the stencils and face velocities F_xphalf = vxmpos * fxppos + vxmneg * fxpneg F_xmhalf = vxmpos * fxmpos + vxmneg * fxmneg q_adv.x[I...] = (F_xphalf - F_xmhalf) / dx F_yphalf = vympos * fyppos + vymneg * fypneg F_ymhalf = vympos * fympos + vymneg * fymneg q_adv.y[I...] = (F_yphalf - F_ymhalf) / dx end
 
-    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", i, j) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
+    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", i, j, I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
     fyppos, fypneg, fympos, fymneg = stencil(f, "y", i, j)
     
 
@@ -86,16 +86,16 @@ end
     qym = vympos .* fympos + vymneg .* fymneg
     q_adv.y[I...] = (qyp - qym) / dx
 
-    adv = (qxp - qxm) / dx + (qyp - qym) / dx
+    #adv = (qxp - qxm) / dx + (qyp - qym) / dx
 
-    
-    q_adv.x[I...] = max(V.x[I...], 0f0) * leftx(f, I...) + 
-                    min(V.x[I...], 0f0) * rightx(f, I...)
-    q_adv.y[I...] = max(V.y[I...], 0f0) * lefty(f, I...) + 
-                    min(V.y[I...], 0f0) * righty(f, I...)
 end 
 
+"q_adv.x[I...] = max(V.x[I...], 0f0) * leftx(f, I...) + 
+                    min(V.x[I...], 0f0) * rightx(f, I...)
+    q_adv.y[I...] = max(V.y[I...], 0f0) * lefty(f, I...) + 
+                    min(V.y[I...], 0f0) * righty(f, I...)"
 
+#TEST THIS LATER
 # trying to test the whole left stencil to see if i can just do left of a kind of thing 
 @kernel inbounds = true function test(f, g::StructuredGrid, O) 
     I = @index(Global, NTuple) 
@@ -255,9 +255,9 @@ end
                     launch(arch, grid, update_thermal! => (T, T_old, qT_diff, qT_adv, dt, grid); bc=batch(grid, bc_T...; exchange=T)) # update the temperature
 
                     #c
-                    launch(arch, grid, update_diffusion_flux! => (qc_diff, c, λ_c, grid))
+                    "launch(arch, grid, update_diffusion_flux! => (qc_diff, c, λ_c, grid))
                     launch(arch, grid, update_advection_flux! => (qc_adv, c, V, dx, grid))
-                    launch(arch, grid, update_thermal! => (c, c_old, qc_diff, qc_adv, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature
+                    launch(arch, grid, update_thermal! => (c, c_old, qc_diff, qc_adv, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature"
                    
                 end
                 

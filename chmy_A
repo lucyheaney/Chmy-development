@@ -54,6 +54,7 @@ end
 @kernel inbounds = true function update_thermal_flux!(qT, T, V, λ_ρCp, g::StructuredGrid, O)
     I = @index(Global, NTuple)
     I = I + O
+    println("T: ", size(T),", b", size(leftx(T,I...)))
     qT.x[I...] = -λ_ρCp * ∂x(T, g, I...) +
                  max(V.x[I...], 0f0) * leftx(T, I...) + 
                  min(V.x[I...], 0f0) * rightx(T, I...)    
