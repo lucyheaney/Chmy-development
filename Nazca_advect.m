@@ -107,7 +107,11 @@ switch scheme{1}
         
     case 'weno3'
         % 3rd order WENO from Jiang & Shu 1996, J Comp Physics
+<<<<<<< HEAD
         [fxppos, fxpneg, fxmpos, fxmneg] = weno3(fcc, xdim, xBC); 
+=======
+        [fxppos, fxpneg, fxmpos, fxmneg] = weno3(fcc, xdim, xBC);
+>>>>>>> 78b2b6f1e7ca6133e3517e184c78a252ba56ff82
         [fzppos, fzpneg, fzmpos, fzmneg] = weno3(fcc, zdim, zBC);
         
     case 'weno5'
