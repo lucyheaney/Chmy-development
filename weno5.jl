@@ -1,7 +1,6 @@
 # WENO5 FUNCTION
 
 function polys(fmm,fm,fc,fp,fpp)
-<<<<<<< HEAD
     p1 = (2*fmm .- 7*fm .+ 11*fc )/6 # polynomials
     p2 = (-fm .+ 5*fc .+ 2*fp )/6
     p3 = (2*fc .+ 5*fp .- fpp)/6
@@ -21,26 +20,41 @@ function polys(fmm,fm,fc,fp,fpp)
     return flux_face
 end
 
-function stencil(f, dim, i, j, I)
+function stencil(f, dim, I, nx, ny)
+
+    i, j = Tuple(I)
+        
+    boundary = (1,1,0,0)
+
+    left = Val(boundary[1])
+    right = Val(boundary[2])
+    bottom = Val(boundary[3])
+    top = Val(boundary[4])
+
+    illl = minus_index(i,3,nx, left)
+    ill  = minus_index(i,2,nx, left)
+    il   = minus_index(i,1,nx, left)
+    ir   = plus_index(i,1,nx, right)
+    irr  = plus_index(i,2,nx, right)
+    irrr = plus_index(i,3,nx, right)
+
+    jbbb = minus_index(j,3,ny, bottom)
+    jbb  = minus_index(j,2,ny, bottom)
+    jb   = minus_index(j,1,ny, bottom)
+    jt   = plus_index(j,1,ny, top)
+    jtt  = plus_index(j,2,ny, top)
+    jttt = plus_index(j,3,ny, top)
+
 
     if dim == "x"
-        println("f: ", size(f))
-        fmmm_a = leftx(f, I...)
-        println("fmmm_a: ", size(fmmm_a))
-        fmmm_b = leftx(fmmm_a, I...)
-        
-        "almost there with this ^
-        
-        instead i need to define bLx = Val(boundary[1]) and set the i,j = Tuple(I) 
-        then do the illl, ill, il, ir, irr, irrr with illl = left_index(i,3,nx,bLx)
-        u1 = u[illl,j] where u1 is the fmmm since u is the field f"
-        fmmm = f[i-3, j]
-        fmm  = f[i-2, j]
-        fm   = f[i-1, j]
+
+        fmmm = f[illl, j]
+        fmm  = f[ill, j]
+        fm   = f[il, j]
         fc   = f[i,   j]
-        fp   = f[i+1, j]
-        fpp  = f[i+2, j]
-        fppp = f[i+3, j]
+        fp   = f[ir, j]
+        fpp  = f[irr, j]
+        fppp = f[irrr, j]
 
         fppos = polys(fmmm, fmm, fm, fc, fp) # need to define these stencils for the weno5 scheme - will need to be adapted to work with the grid structure and kernel launches
         fpneg = polys(fppp, fpp, fp, fc, fm)
@@ -48,13 +62,13 @@ function stencil(f, dim, i, j, I)
         fmneg = polys(fpp, fp, fc, fm, fmm)
 
     elseif dim == "y"
-        fmmm = f[i, j-3]
-        fmm  = f[i, j-2]
-        fm   = f[i, j-1]
+        fmmm = f[i, jbbb]
+        fmm  = f[i, jbb]
+        fm   = f[i, jb]
         fc   = f[i, j]
-        fp   = f[i, j+1]
-        fpp  = f[i, j+2]
-        fppp = f[i, j+3]
+        fp   = f[i, jt]
+        fpp  = f[i, jtt]
+        fppp = f[i, jttt]
 
         fppos = polys(fmmm, fmm, fm, fc, fp) # need to define these stencils for the weno5 scheme - will need to be adapted to work with the grid structure and kernel launches
         fpneg = polys(fppp, fpp, fp, fc, fm)
@@ -96,35 +110,47 @@ function face_velocity(V, dim, i, j)
     return vmpos, vmneg, vppos, vpneg
 
 end
-=======
-    p1 = (2*fmm - 7*fm + 11*fc )/6
-    p2 = ( -fm  + 5*fc +  2*fp )/6
-    p3 = (2*fc  + 5*fp -    fpp)/6
 
-    b1 = 13/12*(fmm - 2*fm + fc ).^2 + 1/4*(  fmm - 4*fm + 3*fc ).^2
-    b2 = 13/12*(fm  - 2*fc + fp ).^2 + 1/4*(  fm  -          fp ).^2
-    b3 = 13/12*(fc  - 2*fp + fpp).^2 + 1/4*(3*fc  - 4*fp +   fpp).^2
 
-    g = (0.1, 0.6, 0.3)
-    eps = 1e-6
-    wp = g[1] ./ (b1 + eps)^2
-    wp = g[2] ./ (b2 + eps)^2
-    wp = g[3] ./ (b3 + eps)^2
-
-    flux_face = (wp1 .* p1 + wp2 .* p2 + wp3 .* p3) ./ (wp1 + wp2 + wp3)
+function residual(f, f_old, dTdt, dTdt_old, dt, alpha, eps)
+    res = (f-f_old)/dt - (dTdt .+ dTdt_old)/2
+    upd = -alpha * res * dt 
+    resnorm = norm(upd) / (norm(f) + eps)
+    return resnorm
 end
 
-# set the stencil here where we need to define fmm , fmm, fm, f, fp, fpp, fppp
 
-fppos = polys(fmm, fm, f, fp, fpp)
-fpneg = polys(fppp, fpp, fp, f, fm)
+# neumann (mirrored boundary value)
+function minus_index(i, d, nx, ::Val{0})
+    return max(i-d,1)
+end
 
-fmpos = polys(fmmm, fmm, fm, f, fp)
-fmneg = polys(fpp, fp, f, fm, fmm)
+# periodic (wrap around)
+function minus_index(i, d, nx, ::Val{1})
+    return mod1(i-d, nx)
+end
 
-# remember can do .@
-fmm = 2
-fm = 2
-fc = 2
-p1 = (2*fmm - 7*fm + 11*fc )/6
->>>>>>> 78b2b6f1e7ca6133e3517e184c78a252ba56ff82
+function plus_index(i, d, nx, ::Val{0})
+    return min(i+d, nx)
+end
+
+function plus_index(i, d, nx, ::Val{1})
+    return mod1(i+d, nx)
+end
+
+
+function debug_plot_field(f)
+    # Copy to CPU if needed (important if f is on GPU)
+    f_cpu = Array(f)
+    println("NaN count before: ", count(isnan, f_cpu))
+    # Replace NaNs with 0 for visualization only
+    f_plot = replace(f_cpu, NaN => 0.0)
+    println("NaN count after: ", count(isnan, f_cpu))
+
+    fig = CairoMakie.Figure()
+    ax = CairoMakie.Axis(fig[1, 1], title = "Temperature Field (NaNs set to 0)")
+    hm = CairoMakie.heatmap!(ax, f_plot)
+    CairoMakie.Colorbar(fig[1, 2], hm)
+
+    display(fig)
+end

@@ -54,7 +54,7 @@ end
 @kernel inbounds = true function update_thermal_flux!(qT, T, V, λ_ρCp, g::StructuredGrid, O)
     I = @index(Global, NTuple)
     I = I + O
-    println("T: ", size(T),", b", size(leftx(T,I...)))
+    
     qT.x[I...] = -λ_ρCp * ∂x(T, g, I...) +
                  max(V.x[I...], 0f0) * leftx(T, I...) + 
                  min(V.x[I...], 0f0) * rightx(T, I...)    
@@ -98,8 +98,8 @@ end
     λ_ρCp = 1f-4 * ly^2f0 / τsc # thermal diffusivity (non dimensional)
 
     # numerics
-    nt     = 20f0 # number of macro timesteps
-    niter  = 50f0nx # fixed point iterations per macro-step
+    nt     = 5f0 # number of macro timesteps
+    niter  = 10f0nx # fixed point iterations per macro-step
     ncheck = 2f0nx # how often check error
     ϵ_it   = 1f-6 # convergence tolerance
 
@@ -210,14 +210,4 @@ end
 
 
 main() # run the main() function 
-
-
-
-
-
-
-
-
-
-
 

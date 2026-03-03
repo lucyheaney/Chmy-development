@@ -107,11 +107,11 @@ switch scheme{1}
         
     case 'weno3'
         % 3rd order WENO from Jiang & Shu 1996, J Comp Physics
-<<<<<<< HEAD
+
         [fxppos, fxpneg, fxmpos, fxmneg] = weno3(fcc, xdim, xBC); 
-=======
+
         [fxppos, fxpneg, fxmpos, fxmneg] = weno3(fcc, xdim, xBC);
->>>>>>> 78b2b6f1e7ca6133e3517e184c78a252ba56ff82
+
         [fzppos, fzpneg, fzmpos, fzmneg] = weno3(fcc, zdim, zBC);
         
     case 'weno5'
@@ -404,3 +404,25 @@ l = max( zeros(size(R)), max(min(1,2*R), min(2,R)) );  % superbee scheme
 fface = fc  + 0.5*l.*(fp - fc);
 
 end
+
+if nargout>1
+    % return advective fluxes on grid faces
+    qz = zeros(size(f,dim(1))+1,size(f,dim(2))+2);
+    qx = zeros(size(f,dim(1))+2,size(f,dim(2))+1);
+    qz(1:end-1,2:end-1) = qzm;
+    qz(end    ,2:end-1) = qzp(end,:);
+    if strcmp(xBC,'periodic') && size(f,xdim)>1
+        qz(:      ,[1,end]) = qz(:,[end-1,2]);
+    else
+        qz(:      ,[1,end]) = qz(:,[2,end-1]);
+    end
+    qx(2:end-1,1:end-1) = qxm;
+    qx(2:end-1,end    ) = qxp(:,end);
+    if strcmp(zBC,'periodic') && size(f,zdim)>1
+        qx([1,end],:      ) = qx([end-1,2],:);
+    else
+        qx([1,end],:      ) = qx([2,end-1],:);
+    end
+end
+
+16*2
