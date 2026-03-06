@@ -112,12 +112,6 @@ function face_velocity(V, dim, i, j)
 end
 
 
-function residual(f, f_old, dTdt, dTdt_old, dt, alpha, eps)
-    res = (f-f_old)/dt - (dTdt .+ dTdt_old)/2
-    upd = -alpha * res * dt 
-    resnorm = norm(upd) / (norm(f) + eps)
-    return resnorm
-end
 
 
 # neumann (mirrored boundary value)

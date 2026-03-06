@@ -108,6 +108,24 @@ end
 end
 
 
+function residual!(f, f_old, dfdt, dfdt_old, Q, dt, alpha, ϵ_it, g::StructuredGrid, O)
+    I = @index(Global, NTuple) 
+    I = I + O 
+
+    launch(arch, grid, update_diffusion_flux! => (qT_diff, diff, T, λ_T, grid))
+    launch(arch, grid, update_advection_flux! => (qT_adv, adv, T, V, dx, nx, ny, grid))
+                    
+    dfdt[I...] = diff[I...] + adv[I...] + Q # where Q = Hr/rhoCp
+    
+    res = (f-f_old)/dt - (dfdt .+ dfdt_old)/2
+    upd = -alpha * res * dt 
+    T .= T + upd
+
+    resnorm = norm(upd) / (norm(f) + ϵ_it)
+    
+end
+
+
 
 # the main part of the code: visco-elastic, incompressible Stokes and heat advection–diffusion solve using Chmy.jl and KernelAbstractions.
 
@@ -169,6 +187,7 @@ end
     T_old   = Field(backend, grid, Center())
     qT_diff = VectorField(backend, grid) # heat flux vector 
     qT_adv  = VectorField(backend, grid) # advective heat flux
+    dfdt    = Field(backend, grid, Center()) # rate of change of temperature field
     c       = Field(backend, grid, Center()) # composition field
     c_old   = Field(backend, grid, Center())
     qc_diff = VectorField(backend, grid) # compositional flux vector
@@ -214,12 +233,16 @@ end
 
             # time step
             dt_diff = min(dx, dy)^2f0 / λ_T / ndims(grid) / 2.1f0 # time step for diffusion?
-
+            dt_adv  = 0.1f0 * min(dx / safe_vx, dy / safe_vy) / ndims(grid) / 2.1f0 # time step for advection
+            dt      = min(dt_diff, dt_adv) # use consistent time step but make sure its the minimum between them
+            
             # avoid division by zero in early iterations
             safe_vx = maximum(abs.(interior(V.x))) > 0f0 ? maximum(abs.(interior(V.x))) : 1f-12
             safe_vy = maximum(abs.(interior(V.y))) > 0f0 ? maximum(abs.(interior(V.y))) : 1f-12
-            dt_adv  = 0.1f0 * min(dx / safe_vx, dy / safe_vy) / ndims(grid) / 2.1f0 # time step for advection
-            dt      = min(dt_diff, dt_adv) # use consistent time step but make sure its the minimum between them
+
+            To = f[I...]
+            dTdto = dfdt[I...]
+            resnorm = 1 
 
             # rheology
             η_ve = 1f0 / (1f0 / η + 1f0 / (G * dt)) # effective viscosity from maxwell viscoelastic law 
@@ -231,19 +254,9 @@ end
                 launch(arch, grid, update_velocity! => (V, r_V, Pr, τ, ρgy, η_ve, νdτ, grid); bc=batch(grid, bc_V...; exchange=V)) # update the veolcity
                 
                 if it > 1 # after first outer step updating advection and diffusion of temperature - since these require T_old and we dont have guesses we use the first time step as T_old etc
-                
-                    #T
                     
-                    launch(arch, grid, update_diffusion_flux! => (qT_diff, diff, T, λ_T, grid))
-                    launch(arch, grid, update_advection_flux! => (qT_adv, adv, T, V, dx, nx, ny, grid))
-                    launch(arch, grid, update_thermal! => (T, T_old, adv, diff, dt, grid); bc=batch(grid, bc_T...; exchange=T)) # update the temperature
+                    launch(arch, grid, residual! => (T, T_old, dTdt, dTdt_old, Q, dt, alpha, ϵ_it, g::StructuredGrid))
                     
-                    
-                    #c
-                    "launch(arch, grid, update_diffusion_flux! => (qc_diff, c, λ_c, grid))
-                    launch(arch, grid, update_advection_flux! => (qc_adv, c, V, dx, grid))
-                    launch(arch, grid, update_thermal! => (c, c_old, qc_diff, qc_adv, dt, grid); bc=batch(grid, bc_c...; exchange=c)) # update the temperature"
-                   
                 end
                 
                 #any(isnan, T) && error("NaN detected at 4")
