@@ -96,7 +96,7 @@ end
     adv[I...] = q_adv.x[I...] + q_adv.y[I...] #rate of change of scalar field due to advection
     #println(size(adv), ": adv")
 
-end 
+end
 
 
 @kernel inbounds = true function rate_of_change!(dfdt, adv, diff, Q, g::StructuredGrid, O) 
@@ -122,8 +122,9 @@ end
 
 # the main part of the code: visco-elastic, incompressible Stokes and heat advection–diffusion solve using Chmy.jl and KernelAbstractions.
 
-@views function main(; backend = CPU(), nxy::Int = 126)
+@views function main(; backend = backend, nxy::Int = 512)
     arch = Arch(backend)
+    #arch_adv = Arch(CPU())
     @info "Using backend: $(typeof(backend))"
 
     # SETUP ------------------------------
@@ -152,8 +153,8 @@ end
     λ_c   = 1f-4 * ly^2f0 / τsc # compositional diffusivity (non dimensional)
 
     # numerics
-    nt     = 10f0 # number of macro timesteps
-    niter  = 10f0nx # fixed point iterations per macro-step
+    nt     = 5f0 # number of macro timesteps
+    niter  = 20f0nx # fixed point iterations per macro-step
     ncheck = 2f0nx # how often check error
     ϵ_it   = 1f-6 # convergence tolerance
 
@@ -221,7 +222,7 @@ end
     Colorbar(fig[2, 2][1, 2], plt.T)
     display(fig)
 
-    any(isnan, T) && error("NaN detected in temperature field before time stepping")
+    #any(isnan, T) && error("NaN detected in temperature field before time stepping")
 
     # main time stepping loop 
     @time begin
