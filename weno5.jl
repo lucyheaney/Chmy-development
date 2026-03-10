@@ -133,18 +133,3 @@ function plus_index(i, d, nx, ::Val{1})
 end
 
 
-function debug_plot_field(f)
-    # Copy to CPU if needed (important if f is on GPU)
-    f_cpu = Array(f)
-    println("NaN count before: ", count(isnan, f_cpu))
-    # Replace NaNs with 0 for visualization only
-    f_plot = replace(f_cpu, NaN => 0.0)
-    println("NaN count after: ", count(isnan, f_cpu))
-
-    fig = CairoMakie.Figure()
-    ax = CairoMakie.Axis(fig[1, 1], title = "Temperature Field (NaNs set to 0)")
-    hm = CairoMakie.heatmap!(ax, f_plot)
-    CairoMakie.Colorbar(fig[1, 2], hm)
-
-    display(fig)
-end
