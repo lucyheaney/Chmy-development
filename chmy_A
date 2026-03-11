@@ -10,7 +10,7 @@ using Plots
 
 # ************** TWO OPTIONS FOR BACKEND: MeatlBackend(), or CPU() ***************
 
-const backend = CPU() # no cuda driver, running on CPUs for now but can also run on MeatlBackend
+const backend = MetalBackend() # no cuda driver, running on CPUs for now but can also run on MeatlBackend
 
 
 #------------------------------------------------------------------------------------------------------------------------
@@ -72,7 +72,7 @@ end
 
 # the main part of the code: visco-elastic, incompressible Stokes and heat advection–diffusion solve using Chmy.jl and KernelAbstractions.
 
-@views function main(; backend = CPU(), nxy::Int = 126)
+@views function main(; backend = MetalBackend(), nxy::Int = 126)
     arch = Arch(backend)
     @info "Using backend: $(typeof(backend))"
 

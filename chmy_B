@@ -21,15 +21,19 @@ const backend = CPU() # no cuda driver, running on CPUs for now but can also run
 # kernel definitions from KernelAbstractions: runs one index per thread
 
 # this kernel doesnt solve any equations just stores the old fields before the next time step (solution backup)
-@kernel inbounds = true function update_old!(T, dTdt, τ, T_old, dTdt_old, τ_old, O) # 
+@kernel inbounds = true function update_old!(T, dTdt, c, dcdt, τ, T_old, dTdt_old, c_old, dcdt_old, τ_old, O) # 
     I = @index(Global, NTuple) # this sets up the indexes depending on 2D 3D etc
     I = I + O # O is an offset tuple to shift the index
     T_old[I...] = T[I...] # I... means split the tuple into individual indexes 
     dTdt_old[I...] = dTdt[I...]
+    c_old[I...] = c[I...]
+    dcdt_old[I...] = dcdt[I...]
     τ_old.xx[I...] = τ.xx[I...] # storing those values
     τ_old.yy[I...] = τ.yy[I...]
     τ_old.xy[I...] = τ.xy[I...]
 end
+
+
 
 @kernel inbounds = true function update_stress!(τ, Pr, ∇V, V, τ_old, η, η_ve, G, dt, dτ_Pr, dτ_r, g::StructuredGrid, O)
     I = @index(Global, NTuple) # global multidimensional index
@@ -112,7 +116,7 @@ end
     I = @index(Global, NTuple) 
     I = I + O 
     
-    res = (f[I...]-f_old[I...])/dt - (dfdt[I...] + dfdt_old[I...])/2 # may need to broadcast
+    res = (f[I...]-f_old[I...])/dt - (dfdt[I...] + dfdt_old[I...])/2 # scalar so dont need the I...
     upd[I...] = -α * res * dt 
     f[I...] += upd[I...]
 
@@ -153,8 +157,8 @@ end
     λ_c   = 1f-4 * ly^2f0 / τsc # compositional diffusivity (non dimensional)
 
     # numerics
-    nt     = 5f0 # number of macro timesteps
-    niter  = 20f0nx # fixed point iterations per macro-step
+    nt     = 3f0 # number of macro timesteps
+    niter  = 5f0nx # fixed point iterations per macro-step
     ncheck = 2f0nx # how often check error
     ϵ_it   = 1f-6 # convergence tolerance
 
@@ -172,16 +176,18 @@ end
     # allocate fields
     Pr      = Field(backend, grid, Center()) # pressure
     ∇V      = Field(backend, grid, Center()) # divergence of velocity
-    V       = VectorField(backend, grid) # velocity
+    V       = VectorField(backend, grid) # velocity - will need to be looked into for temperaturfe vs composition
     r_V     = VectorField(backend, grid) 
     τ       = TensorField(backend, grid) # stress components 
     τ_old   = TensorField(backend, grid) # temperature 
+    
+    
     T       = Field(backend, grid, Center())
     dTdt    = Field(backend, grid, Center())
     dTdt_old= Field(backend, grid, Center())
-    Q       = Field(backend, grid, Center()) # internal heating term
-    adv     = Field(backend, grid, Center())
-    diff    = Field(backend, grid, Center())
+    adv_T   = Field(backend, grid, Center())
+    diff_T  = Field(backend, grid, Center())
+    Q_T     = Field(backend, grid, Center()) # source term
     T_old   = Field(backend, grid, Center())
     qT_diff = VectorField(backend, grid) # heat flux vector 
     qT_adv  = VectorField(backend, grid) # advective heat flux
@@ -191,12 +197,18 @@ end
     c_old   = Field(backend, grid, Center())
     qc_diff = VectorField(backend, grid) # compositional flux vector
     qc_adv  = VectorField(backend, grid) # advective compositional flux
+    Q_c     = Field(backend, grid, Center()) # source term for composition - can be used to add in compositional buoyancy or reactions if desired
+    dcdt    = Field(backend, grid, Center())
+    dcdt_old= Field(backend, grid, Center())
+    adv_c   = Field(backend, grid, Center())
+    diff_c  = Field(backend, grid, Center())
 
     
     # initial conditions
     init_incl(x, y, x0, y0, r, in, out) = ifelse((x - x0)^2f0 + (y - y0)^2f0 < r^2f0, in, out)
     ρgy = FunctionField(init_incl, grid, (Center(), Vertex()); parameters=(x0=0f0, y0=0f0, r=0.1f0lx, in=ρg.y, out=0f0))
     set!(T, grid, init_incl; parameters=(x0=0f0, y0=0f0, r=0.1f0lx, in=T0, out=Ta)) # adding a hot circle in centre with the cold outside
+    set!(c, grid, init_incl; parameters=(x0=0f0, y0=0f0, r=0.1f0lx, in=1f0, out=0f0)) # compositional
     η_ve = 0.0
 
     # boundary conditions
@@ -211,15 +223,18 @@ end
     axs = (Pr = Axis(fig[1, 1][1, 1]; aspect=DataAspect(), xlabel="x", title="Pr"),
            Vx = Axis(fig[1, 2][1, 1]; aspect=DataAspect(), xlabel="x", title="Vx"),
            Vy = Axis(fig[2, 1][1, 1]; aspect=DataAspect(), xlabel="x", title="Vy"),
-           T  = Axis(fig[2, 2][1, 1]; aspect=DataAspect(), xlabel="x", title="T"))
+           T  = Axis(fig[2, 2][1, 1]; aspect=DataAspect(), xlabel="x", title="T"),
+           c  = Axis(fig[3, 1][1, 1]; aspect=DataAspect(), xlabel="x", title="c"))
     plt = (Pr = CairoMakie.heatmap!(axs.Pr, centers(grid)..., interior(Pr) |> Array; colormap=:turbo),
            Vx = CairoMakie.heatmap!(axs.Vx, xvertices(grid), ycenters(grid), interior(V.x) |> Array; colormap=:turbo),
            Vy = CairoMakie.heatmap!(axs.Vy, xcenters(grid), yvertices(grid), interior(V.y) |> Array; colormap=:turbo),
-           T  = CairoMakie.heatmap!(axs.T, centers(grid)..., interior(T) |> Array; colormap=:turbo))
+           T  = CairoMakie.heatmap!(axs.T, centers(grid)..., interior(T) |> Array; colormap=:turbo),
+           c  = CairoMakie.heatmap!(axs.c, centers(grid)..., colorrange=(0,1), interior(c) |> Array; colormap=:turbo))
     Colorbar(fig[1, 1][1, 2], plt.Pr)
     Colorbar(fig[1, 2][1, 2], plt.Vx)
     Colorbar(fig[2, 1][1, 2], plt.Vy)
     Colorbar(fig[2, 2][1, 2], plt.T)
+    Colorbar(fig[3, 1][1, 2], plt.c)
     display(fig)
 
     #any(isnan, T) && error("NaN detected in temperature field before time stepping")
@@ -254,17 +269,31 @@ end
                     
                     while resnorm_T > ϵ_it # inner loop for thermal solve - iterate until converged
 
-                        launch(arch, grid, diffusion! => (qT_diff, diff, T, λ_T, grid))
-                        launch(arch, grid, advection! => (qT_adv, adv, T, V, dx, nx, ny, grid))
-                        launch(arch, grid, rate_of_change! => (dTdt, adv, diff, Q, grid))
+                        launch(arch, grid, diffusion! => (qT_diff, diff_T, T, λ_T, grid))
+                        launch(arch, grid, advection! => (qT_adv, adv_T, T, V, dx, nx, ny, grid))
+                        launch(arch, grid, rate_of_change! => (dTdt, adv_T, diff_T, Q_T, grid))
                         launch(arch, grid, field_update! => (T, T_old, dTdt, dTdt_old, dt, upd, α, grid); bc=batch(grid, bc_T...; exchange=T))
-
+                        
                         KernelAbstractions.synchronize(backend)
 
                         resnorm_T = norm(interior(upd)) / (norm(interior(T)) + ϵ_it) # compute the residual norm for convergence check - need to make sure this is correctly computed in the kernel and returned to the host for this check
 
                     end
 
+                    resnorm_c = 1f0
+
+                    while resnorm_c > ϵ_it # inner loop for compositional solve - iterate until converged
+
+                        launch(arch, grid, diffusion! => (qc_diff, diff_c, c, λ_c, grid))
+                        launch(arch, grid, advection! => (qc_adv, adv_c, c, V, dx, nx, ny, grid))
+                        launch(arch, grid, rate_of_change! => (dcdt, adv_c, diff_c, Q_c, grid)) # need to change this to compositional source term if we want to add that in
+                        launch(arch, grid, field_update! => (c, c_old, dcdt, dcdt_old, dt, upd, α, grid); bc=batch(grid, bc_c...; exchange=c))
+
+                        KernelAbstractions.synchronize(backend)
+
+                        resnorm_c = norm(interior(upd)) / (norm(interior(c)) + ϵ_it) # compute the residual norm for convergence check - need to make sure this is correctly computed in the kernel and returned to the host for this check
+
+                    end
                 end
 
                 #any(isnan, T) && error("NaN detected at 4")

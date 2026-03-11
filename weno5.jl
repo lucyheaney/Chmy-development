@@ -133,3 +133,16 @@ function plus_index(i, d, nx, ::Val{1})
 end
 
 
+@kernel inbounds = true function update_old_stokes!(τ,τ_old, O) # 
+    I = @index(Global, NTuple) # this sets up the indexes depending on 2D 3D etc
+    I = I + O # O is an offset tuple to shift the index
+    τ_old.xx[I...] = τ.xx[I...] # storing those values
+    τ_old.yy[I...] = τ.yy[I...]
+    τ_old.xy[I...] = τ.xy[I...]
+end
+
+@kernel inbounds = true function update_old_fields!(f, f_old, O) # 
+    I = @index(Global, NTuple) # this sets up the indexes depending on 2D 3D etc
+    I = I + O # O is an offset tuple to shift the index
+    f_old[I...] = f[I...] # I... means split the tuple into individual indexes 
+end
