@@ -111,8 +111,42 @@ function face_velocity(V, dim, i, j)
 
 end
 
+function advection_fct!(q_adv, f, V, dx, nx, ny, g::StructuredGrid, I, O)
+    
+    i, j = Tuple(I)
 
+    vxmpos, vxmneg, vxppos, vxpneg = face_velocity(V, "x", i, j) # get the face velocities for the x direction - will need to be adapted to work with the grid structure and kernel launches vypmpos, vypmneg, vyppos, vypneg = face_velocity(V, "y") fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches fyppos, fypneg, fympos, fymneg = stencil(f, "y", I) # compute the WENO5 fluxes for x and y directions using the stencils and face velocities wp1 = g[1] ./ (b1 .+ eps)^2 wp2 = g[2] ./ (b2 .+ eps)^2
+    vympos, vymneg, vyppos, vypneg = face_velocity(V, "y", i, j) # get the face velocities for the y direction - will need to be adapted to work with the grid structure and kernel launches # compute the WENO5 fluxes for x and y directions using the stencils and face velocities F_xphalf = vxmpos * fxppos + vxmneg * fxpneg F_xmhalf = vxmpos * fxmpos + vxmneg * fxmneg q_adv.x[I...] = (F_xphalf - F_xmhalf) / dx F_yphalf = vympos * fyppos + vymneg * fypneg F_ymhalf = vympos * fympos + vymneg * fymneg q_adv.y[I...] = (F_yphalf - F_ymhalf) / dx end
 
+    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I, nx, ny) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
+    fyppos, fypneg, fympos, fymneg = stencil(f, "y", I, nx, ny)
+    
+
+    qxp = vxppos .* fxppos + vxpneg .* fxpneg
+    qxm = vxmpos .* fxmpos + vxmneg .* fxmneg
+    q_adv.x[I...] = (qxp - qxm) / dx #???? need to revisit
+
+    qyp = vyppos .* fyppos + vypneg .* fypneg
+    qym = vympos .* fympos + vymneg .* fymneg
+    q_adv.y[I...] = (qyp - qym) / dx
+
+    #adv[I...] = (qxp - qxm) / dx + (qyp - qym) / dx # change this to correct q_advs
+    return q_adv.x[I...] + q_adv.y[I...] #rate of change of scalar field due to advection
+    #println(size(adv), ": adv")
+
+end
+
+function diffusion_fct!(q_diff, f, κ, g::StructuredGrid, I, O)
+    
+    i, j = Tuple(I)
+
+    q_diff.x[I...] = -κ * ∂x(f, g, I...)
+    q_diff.y[I...] = -κ * ∂y(f, g, I...)
+
+    return -(q_diff.x[I...] + q_diff.y[I...]) # this is the divergence of the diffusive flux - need to check the signs and make sure its correct for the update of f in the update_thermal kernel
+
+    #println(size(diff), ": diff")
+end
 
 # neumann (mirrored boundary value)
 function minus_index(i, d, nx, ::Val{0})
