@@ -14,7 +14,7 @@ include("weno5.jl") # including the weno5 scheme for advection fluxes -  will ne
 
 # ************** TWO OPTIONS FOR BACKEND: MeatlBackend(), or CPU() ***************
 
-const backend = CPU() # no cuda driver, running on CPUs for now but can also run on MeatlBackend
+const backend = MetalBackend() # no cuda driver, running on CPUs for now but can also run on MeatlBackend
 
 
 #------------------------------------------------------------------------------------------------------------------------
@@ -81,58 +81,6 @@ end
     #println(size(diff), ": diff")
 end
 
-# NOT IN SE REFER TO FUNCTIONS
-@kernel inbounds = true function advection!(q_adv, adv, f, V, dx, nx, ny, g::StructuredGrid, O)
-    I = @index(Global, NTuple)
-    #println(I, "I")
-    I = I + O
-    i, j = I
-
-    vxmpos, vxmneg, vxppos, vxpneg = face_velocity(V, "x", i, j) # get the face velocities for the x direction - will need to be adapted to work with the grid structure and kernel launches vypmpos, vypmneg, vyppos, vypneg = face_velocity(V, "y") fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches fyppos, fypneg, fympos, fymneg = stencil(f, "y", I) # compute the WENO5 fluxes for x and y directions using the stencils and face velocities wp1 = g[1] ./ (b1 .+ eps)^2 wp2 = g[2] ./ (b2 .+ eps)^2
-    vympos, vymneg, vyppos, vypneg = face_velocity(V, "y", i, j) # get the face velocities for the y direction - will need to be adapted to work with the grid structure and kernel launches # compute the WENO5 fluxes for x and y directions using the stencils and face velocities F_xphalf = vxmpos * fxppos + vxmneg * fxpneg F_xmhalf = vxmpos * fxmpos + vxmneg * fxmneg q_adv.x[I...] = (F_xphalf - F_xmhalf) / dx F_yphalf = vympos * fyppos + vymneg * fypneg F_ymhalf = vympos * fympos + vymneg * fymneg q_adv.y[I...] = (F_yphalf - F_ymhalf) / dx end
-
-    fxppos, fxpneg, fxmpos, fxmneg = stencil(f, "x", I, nx, ny) # get the stencils for the x direction - will need to be adapted to work with the grid structure and kernel launches
-    fyppos, fypneg, fympos, fymneg = stencil(f, "y", I, nx, ny)
-    
-
-    qxp = vxppos .* fxppos + vxpneg .* fxpneg
-    qxm = vxmpos .* fxmpos + vxmneg .* fxmneg
-    q_adv.x[I...] = (qxp - qxm) / dx #???? need to revisit
-
-    qyp = vyppos .* fyppos + vypneg .* fypneg
-    qym = vympos .* fympos + vymneg .* fymneg
-    q_adv.y[I...] = (qyp - qym) / dx
-
-    #adv[I...] = (qxp - qxm) / dx + (qyp - qym) / dx # change this to correct q_advs
-    adv[I...] = q_adv.x[I...] + q_adv.y[I...] #rate of change of scalar field due to advection
-    #println(size(adv), ": adv")
-
-end
-
-# RETIRED FUNCTION
-@kernel inbounds = true function rate_of_change!(dfdt, adv, diff, Q, g::StructuredGrid, O) 
-    I = @index(Global, NTuple) 
-    I = I + O 
-
-    dfdt[I...] = diff[I...] + adv[I...] + Q[I...] # where Q = Hr/rhoCp
-
-end
-
-# RETIRED FUNCTION
-@kernel inbounds = true function field_update!(f, f_old, dfdt, dfdt_old, dt, upd, α, g::StructuredGrid, O)
-    I = @index(Global, NTuple) 
-    I = I + O 
-    
-    res = (f[I...]-f_old[I...])/dt - (dfdt[I...] + dfdt_old[I...])/2 # scalar so dont need the I...
-    upd[I...] = -α * res * dt
-    f[I...] += upd[I...]
-
-end
-
-
-
-
-
 # NEW FUNCTIONS !!!!!!!!!!!!!!
 
 @kernel inbounds = true function residual!(f, f_old, dfdt, dfdt_old, q_adv, q_diff, V, κ, dx, nx, ny, Q, res, dt, g::StructuredGrid, O) 
@@ -157,15 +105,15 @@ end
 
 # the main part of the code: visco-elastic, incompressible Stokes and heat advection–diffusion solve using Chmy.jl and KernelAbstractions.
 
-@views function main(; backend = backend, nxy::Int = 512)
+@views function main(; backend = backend, nxy::Int = 256)
     arch = Arch(backend)
-    #arch_adv = Arch(CPU())
+    
     @info "Using backend: $(typeof(backend))"
 
     # SETUP ------------------------------
     # geometry
     lx, ly = 2f0, 2f0 # domain size
-    nx = ny = nxy
+    nx = ny = nxy # number of grid cells
     grid   = UniformGrid(arch; origin=(-lx/2f0, -ly/2f0), extent=(lx, ly), dims=(nx, ny))     # 2D unifrm structured grid
     launch = Launcher(arch, grid)
     dx, dy = spacing(grid)
@@ -177,6 +125,8 @@ end
     # scales
     psc  = G                    # pressure scale
     τsc  = η/psc                # stress scale
+    Tsc = 1f0                   # temperature scale
+    csc = 1f0                   # composition scale
 
     # heat
     T0    = 1f0                 # initial temperature
@@ -184,15 +134,15 @@ end
     λ_T   = 1f-4 * ly^2f0 / τsc # thermal diffusivity (non dimensional)
 
     # composition
-    c0    = 1f0                 # initial composition
+    c0    = 1f0                 # initial composition - somewhere here leappart will be called
     λ_c   = 1f-4 * ly^2f0 / τsc # compositional diffusivity (non dimensional)
 
     # numerics
     nt     = 4f0                # number of macro timesteps
     niter  = 8f0nx              # fixed point iterations per macro-step
     ncheck = 2f0nx              # how often check error
-    ϵ_it   = 1f-16              # to prevent division by zero
-    res_tol = 1f-5              # convergence tolerance
+    ϵ_abs  = 1f-5               # absolute convergence tolerance
+    ϵ_rel  = 1f-3               # relative convergence tolerance
 
     # PT params for the nonlinear Stokes solve
     re_m    = 2.3f0 * π 
@@ -227,9 +177,7 @@ end
     upd_T    = Field(backend, grid, Center())
     qT_diff  = VectorField(backend, grid)           # heat flux vector 
     qT_adv   = VectorField(backend, grid)           # advective heat flux
-    adv_T    = Field(backend, grid, Center()) # RETIRED: advection component of rate of change of temperature
-    diff_T   = Field(backend, grid, Center()) # RETIRED: diffusion component of rate of change of temperature
-    Q_T      = Field(backend, grid, Center())       # source term of rate of change of heat
+   Q_T      = Field(backend, grid, Center())       # source term of rate of change of heat
 
     c        = Field(backend, grid, Center())       # composition field (SAME AS TEMPERATURE)
     c_old    = Field(backend, grid, Center())
@@ -239,12 +187,9 @@ end
     upd_c    = Field(backend, grid, Center())
     qc_diff  = VectorField(backend, grid)           # compositional flux vector
     qc_adv   = VectorField(backend, grid)           # advective compositional flux
-    adv_c    = Field(backend, grid, Center()) # RETIRED
-    diff_c   = Field(backend, grid, Center()) # RETIRED
     Q_c      = Field(backend, grid, Center())       # source term for composition - can be used to add in compositional buoyancy or reactions if desired
     
 
-    
     # initial conditions
     init_incl(x, y, x0, y0, r, in, out) = ifelse((x - x0)^2f0 + (y - y0)^2f0 < r^2f0, in, out)
     ρgy = FunctionField(init_incl, grid, (Center(), Vertex()); parameters=(x0=0f0, y0=0f0, r=0.1f0lx, in=ρg.y, out=0f0))
@@ -278,6 +223,11 @@ end
     Colorbar(fig[3, 1][1, 2], plt.c)
     display(fig)
 
+    err0_Pr = 0f0
+    err0_Vx = 0f0
+    err0_Vy = 0f0
+    err0_T = 0f0
+    err0_c = 0f0
     #any(isnan, T) && error("NaN detected in temperature field before time stepping")
 
     # main time stepping loop 
@@ -300,31 +250,18 @@ end
             (step > 2) && (ncheck = ceil(Int, 0.5f0nx)) # adjusting error check recomputing interval for convergence check
 
             iter = 0f0
-            total_resnorm = 1f0 # initialise total residual norm for convergence check of nonlinear solver
+            total_err = 1f0 # initialise total residual norm for convergence check of nonlinear solver
+            total_rel = 0f0 # initialise total relative residual norm for convergence check of nonlinear solver
+            
             # inside the smaller loop for stokes and heat to be iteratively solved until the residual is small 
-            while total_resnorm > res_tol && iter < niter # nonlinear solver iterations 
+            while iter < niter && total_err > ϵ_abs && (total_err/total_rel) > ϵ_rel # nonlinear solver iterations 
                 
                 iter = iter + 1f0           # iteration counter
-
-                resnorm_Pr = 0f0            # initialise resnorm so that if in step 1 T and c have no contribution
-                resnorm_Vx = 0f0
-                resnorm_Vy = 0f0
-                resnorm_T = 0f0 
-                resnorm_c = 0f0 
-                resnorm0 = 0f0
-                
 
                 # launch stokes solver which contains updates
                 launch(arch, grid, update_stress! => (τ, Pr, ∇V, V, τ_old, η, η_ve, G, dt, dτ_Pr, dτ_r, upd_Pr, upd_τxx, upd_τyy, upd_τxy, grid)) # update stresses
                 launch(arch, grid, update_velocity! => (V, r_V, Pr, τ, ρgy, η_ve, νdτ, upd_Vx, upd_Vy, grid); bc=batch(grid, bc_V...; exchange=V)) # update the veolcity
-                
-                # calculate resnorm for pressure and velocigty (x and y) using same method as T and c 
-                resnorm_Pr = norm(interior(upd_Pr)) / (norm(interior(Pr)) + ϵ_it) 
-                resnorm_Vx = norm(interior(upd_Vx)) / (norm(interior(V.x)) + ϵ_it)
-                resnorm_Vy = norm(interior(upd_Vy)) / (norm(interior(V.y)) + ϵ_it)
-
-
-                #total_resnorm = resnorm_Pr + resnorm_Vx + resnorm_Vy # not needed now?
+               
 
                 if step > 1 # after first outer step updating advection and diffusion of temperature - since these require T_old and we dont have guesses we use the first time step as T_old etc
                     
@@ -335,55 +272,49 @@ end
                     launch(arch, grid, residual! => (c, c_old, dcdt, dcdt_old, qc_adv, qc_diff, V, λ_c, dx, nx, ny, Q_c, res_c, dt, grid))
                     launch(arch, grid, update_field! => (c, dt, upd_c, res_c, α, grid); bc=batch(grid, bc_c...; exchange=c))
 
-                    resnorm_T = norm(interior(upd_T)) / (norm(interior(T)) + ϵ_it) 
-                    resnorm_c = norm(interior(upd_c)) / (norm(interior(c)) + ϵ_it) # compute the residual norm for convergence check - need to make sure this is correctly computed in the kernel and returned to the host for this check
-                
                     KernelAbstractions.synchronize(backend)
                     # inner loop for thermal solve - NEED TO ADD OTHER CRITERIA (IE MAX ITER SO ITER CAN BE DEFINE HERE 
-                    
-                    # update_field!(f, dt, upd, res, α, g::StructuredGrid, O)
-                    #launch(arch, grid, diffusion! => (qc_diff, diff_c, c, λ_c, grid))
-                    #launch(arch, grid, advection! => (qc_adv, adv_c, c, V, dx, nx, ny, grid))
-                    #launch(arch, grid, rate_of_change! => (dcdt, adv_c, diff_c, Q_c, grid)) # need to change this to compositional source term if we want to add that in
-                    #launch(arch, grid, field_update! => (c, c_old, dcdt, dcdt_old, dt, upd_c, α, grid); bc=batch(grid, bc_c...; exchange=c))
-                    #total_resnorm += resnorm_T + resnorm_c
-                
+                  
                 end
-
-                if step == 1 && total_resnorm > resnorm0
-                    resnorm0_Pr = resnorm_Pr + ϵ_it 
-                    resnorm0_Vx = resnorm_Vx + ϵ_it
-                    resnorm0_Vy = resnorm_Vy + ϵ_it
-                elseif step == 2 && total_resnorm > resnorm0
-                    resnorm0_T = resnorm_T + ϵ_it
-                    resnorm0_c = resnorm_c + ϵ_it
-                end #???
 
                 #any(isnan, T) && error("NaN detected at 4")
 
                 if iter % ncheck == 0 # every ncheck iterations check error 
                     bc!(arch, grid, r_V.x => (x=Dirichlet(),), r_V.y => (y=Dirichlet(),)) # not sure why this is applied here
-                    err = (Pr=norm(abs.(interior(∇V))) * τsc,
-                           Vx=norm(abs.(interior(r_V.x))) * ly / psc,
-                           Vy=norm(abs.(interior(r_V.y))) * ly / psc,
-                           T=norm(interior(upd_T)) / (norm(interior(T)) + ϵ_it) ,
-                           c=norm(interior(upd_c)) / (norm(interior(c)) + ϵ_it))
-                    err_rel = (Pr = err.Pr / (resnorm0_Pr + ϵ_it), 
-                               Vx = err.Vx / (resnorm0_Vx + ϵ_it), 
-                               Vy = err.Vy / (resnorm0_Vy + ϵ_it), 
-                               T  = err.T  / (resnorm0_T + ϵ_it), 
-                               c  = err.c  / (resnorm0_c + ϵ_it))
-                    total_resnorm = err.Pr + err.Vx + err.Vy + err.T + err.c # calculate total resnorm values to determine if stay in loop
-                    @printf("  iter/nx=%.1f | abs res = [Pr=%1.3e, Vx=%1.3e, Vy=%1.3e, T = %1.3e, c = %1.3e] |, \n rel res = [Pr=%1.3e, Vx=%1.3e, Vy=%1.3e, T = %1.3e, c = %1.3e]\n", iter / nx, err..., err_rel...)               
-                    # stop if converged or error if NaN
+                    err = (Pr=maximum(abs.(interior(∇V))) * τsc,
+                           Vx=maximum(abs.(interior(r_V.x))) * ly / psc,
+                           Vy=maximum(abs.(interior(r_V.y))) * ly / psc,
+                           T=maximum(abs.(interior(res_T))) * Tsc,
+                           c=maximum(abs.(interior(res_c))) * csc)
+
+                    if iter == ncheck # store the initial resnorm values for the first iteration of the first step to use as a reference for convergence check in later iterations - this is because in the first step T and c have no contribution to the residual so we want to make sure we are checking convergence based on the initial resnorm values for pressure and velocity
+                        err0_Pr = err.Pr
+                        err0_Vx = err.Vx
+                        err0_Vy = err.Vy
+                    end 
+                    if step > 1 && iter == ncheck # store the initial resnorm values for the first iteration of the second step to use as a reference for convergence check in later iterations - this is because in the second step we start to have contributions from T and c to the residual so we want to make sure we are checking convergence based on the initial resnorm values for T and c in this step    
+                        err0_T = err.T
+                        err0_c = err.c
+                    end
+
+                    err_rel = (Pr=err.Pr / err0_Pr,
+                               Vx=err.Vx / err0_Vx,
+                               Vy=err.Vy / err0_Vy,
+                               T=err.T / err0_T,
+                               c=err.c / err0_c)
+                    total_err = err.Pr + err.Vx + err.Vy + err.T + err.c # calculate total resnorm values to determine if stay in loop
+                    total_rel = err_rel.Pr + err_rel.Vx + err_rel.Vy + err_rel.T + err_rel.c # calculate total relative resnorm values to determine if stay in loop
+                    
+                    @printf("  iter/nx=%.1f, abs err = [Pr=%1.3e, Vx=%1.3e, Vy=%1.3e, T=%1.3e, c=%1.3e], \n               rel err = [Pr=%1.3e, Vx=%1.3e, Vy=%1.3e, T=%1.3e, c=%1.3e], \n               total error = %1.3e \n", iter / nx, err..., err_rel..., total_err)
                     #all(values(err) .< res_tol) && break #???? should that be res_tol
-                    total_resnorm < res_tol && break # if its below the tolerance, exit loop
+                    #total_err < res_tol && break # if its below the tolerance, exit loop
                     any(.!isfinite.(values(err))) && error("simulation failed, err = $err")
                 end
                 
             end
 
-            #@printf("  converged in %d iterations with resnorm = %1.3e \n", iter, total_resnorm)
+            # average vals of fields
+            #@printf("averages: Pr= %1.3e, Vx= %1.3e, Vy= %1.3e, T= %1.3e, c= %1.3e \n", mean(abs.interior))
 
         end
         KernelAbstractions.synchronize(backend) # make sure that all kernel launches finsih before moving onto plotting
