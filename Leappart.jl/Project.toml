@@ -1,0 +1,10 @@
+name = "Leappart"
+uuid = "49fbf2ea-cf73-4b65-9c56-e163ba3c9ae4"
+version = "0.1.0"
+authors = ["lucyheaney <l.heaney.1@research.gla.ac.uk>"]
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+
+[compat]
+LinearAlgebra = "1.12.0"
